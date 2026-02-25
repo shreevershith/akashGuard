@@ -2,6 +2,9 @@
 .env
 *.env.local
 
+# Debug/test scripts with potential secrets
+misc/
+
 # Claude Code
 .claude/
 CLAUDE.md
