@@ -568,6 +568,104 @@
   }
   .evt-svc-healthy .evt-label { color: var(--green); font-size: 12px; }
 
+  /* Agent Pipeline - live status card */
+  .agent-pipeline {
+    margin-top: 16px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+  .agent-pipeline-title {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .agent-pipeline-title .live-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: livePulse 2s ease-in-out infinite;
+  }
+  .pipeline-step {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    position: relative;
+  }
+  .pipeline-step:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 26px;
+    width: 1px;
+    height: calc(100% - 14px);
+    background: var(--border);
+  }
+  .pipeline-dot {
+    width: 15px; height: 15px;
+    min-width: 15px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    background: transparent;
+    position: relative;
+    z-index: 1;
+    transition: all 0.3s ease;
+  }
+  .pipeline-dot.idle {
+    border-color: rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.04);
+  }
+  .pipeline-dot.active {
+    border-color: var(--blue);
+    background: rgba(59,130,246,0.25);
+    animation: dotPulse 1.2s ease-in-out infinite;
+  }
+  .pipeline-dot.done {
+    border-color: var(--green);
+    background: var(--green);
+  }
+  .pipeline-dot.fail {
+    border-color: var(--red);
+    background: var(--red);
+  }
+  @keyframes dotPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); }
+    50% { box-shadow: 0 0 0 5px rgba(59,130,246,0); }
+  }
+  @keyframes livePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  .pipeline-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .pipeline-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    transition: color 0.3s ease;
+  }
+  .pipeline-step.step-active .pipeline-label { color: var(--blue); }
+  .pipeline-step.step-done .pipeline-label { color: var(--green); }
+  .pipeline-step.step-fail .pipeline-label { color: var(--red); }
+  .pipeline-detail {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 1px;
+  }
+
   .powered {
     margin-top: 16px;
     text-align: center;
@@ -853,6 +951,44 @@
     <div class="col-title">Services</div>
     <div id="services"><div class="empty-state">Loading...</div></div>
     <div id="quickStats"></div>
+    <div class="agent-pipeline" id="agentPipeline">
+      <div class="agent-pipeline-title"><span class="live-dot"></span> Agent Pipeline</div>
+      <div class="pipeline-step step-active" id="pStep0">
+        <div class="pipeline-dot active" id="pDot0"></div>
+        <div class="pipeline-info">
+          <div class="pipeline-label">Ping</div>
+          <div class="pipeline-detail" id="pDetail0">Waiting...</div>
+        </div>
+      </div>
+      <div class="pipeline-step" id="pStep1">
+        <div class="pipeline-dot idle" id="pDot1"></div>
+        <div class="pipeline-info">
+          <div class="pipeline-label">Failures</div>
+          <div class="pipeline-detail" id="pDetail1">0 / 3</div>
+        </div>
+      </div>
+      <div class="pipeline-step" id="pStep2">
+        <div class="pipeline-dot idle" id="pDot2"></div>
+        <div class="pipeline-info">
+          <div class="pipeline-label">AI Diagnosis</div>
+          <div class="pipeline-detail" id="pDetail2">Idle</div>
+        </div>
+      </div>
+      <div class="pipeline-step" id="pStep3">
+        <div class="pipeline-dot idle" id="pDot3"></div>
+        <div class="pipeline-info">
+          <div class="pipeline-label">Recovery</div>
+          <div class="pipeline-detail" id="pDetail3">Idle</div>
+        </div>
+      </div>
+      <div class="pipeline-step" id="pStep4">
+        <div class="pipeline-dot idle" id="pDot4"></div>
+        <div class="pipeline-info">
+          <div class="pipeline-label">Result</div>
+          <div class="pipeline-detail" id="pDetail4">--</div>
+        </div>
+      </div>
+    </div>
     <div class="powered">Powered by<br><strong>AkashML + Akash Network</strong></div>
   </div>
 
@@ -983,6 +1119,100 @@ let charts = {};
 let missedEvents = 0;
 let eventCounter = 0;
 let globalStatus = 'ok'; // 'ok' | 'down' | 'recovering'
+
+// Pipeline live state
+let pipelineThreshold = 3;
+let pipelineFailures = 0;
+
+function setPipelineStep(idx, state, detail) {
+  // state: 'idle' | 'active' | 'done' | 'fail'
+  const $step = document.getElementById('pStep' + idx);
+  const $dot = document.getElementById('pDot' + idx);
+  const $detail = document.getElementById('pDetail' + idx);
+  if (!$step || !$dot) return;
+  $step.className = 'pipeline-step' + (state === 'active' ? ' step-active' : state === 'done' ? ' step-done' : state === 'fail' ? ' step-fail' : '');
+  $dot.className = 'pipeline-dot ' + state;
+  if (detail && $detail) $detail.textContent = detail;
+}
+
+function resetPipeline(keepPing) {
+  if (!keepPing) setPipelineStep(0, 'active', 'Waiting...');
+  setPipelineStep(1, 'idle', '0 / ' + pipelineThreshold);
+  setPipelineStep(2, 'idle', 'Idle');
+  setPipelineStep(3, 'idle', 'Idle');
+  setPipelineStep(4, 'idle', '--');
+  pipelineFailures = 0;
+}
+
+function handlePipelineEvent(type, data) {
+  if (type === 'health_check') {
+    const st = data.status || '';
+    const code = data.status_code || '';
+    const ms = data.response_time_ms;
+    if (st === 'healthy') {
+      setPipelineStep(0, 'done', code + (ms ? ', ' + Math.round(ms) + 'ms' : '') + ' OK');
+    } else if (st === 'cooldown') {
+      setPipelineStep(0, 'done', 'Cooldown ' + (data.remaining || '') + 's');
+    } else {
+      setPipelineStep(0, 'fail', code ? code + ' FAIL' : (data.error || 'Error').substring(0, 30));
+    }
+  }
+
+  if (type === 'health_streak') {
+    pipelineFailures = data.consecutive_failures || 0;
+    const thresh = data.threshold || pipelineThreshold;
+    setPipelineStep(1, pipelineFailures >= thresh ? 'fail' : 'active', pipelineFailures + ' / ' + thresh);
+  }
+
+  if (type === 'service_down') {
+    const f = data.consecutive_failures || 0;
+    pipelineFailures = f;
+    setPipelineStep(1, 'fail', f + ' / ' + pipelineThreshold + ' — DOWN');
+  }
+
+  if (type === 'diagnosis_start') {
+    setPipelineStep(2, 'active', 'Consulting AI...');
+  }
+
+  if (type === 'diagnosis' || type === 'llm_decision') {
+    const conf = data.confidence ? Math.round(data.confidence * 100) + '%' : '';
+    const action = data.recommended_action || data.action || '';
+    setPipelineStep(2, 'done', (action ? action.toUpperCase() : 'Done') + (conf ? ' (' + conf + ')' : ''));
+  }
+
+  if (type === 'recovery_start') {
+    setPipelineStep(3, 'active', 'Starting recovery...');
+  }
+
+  if (type === 'recovery_progress') {
+    setPipelineStep(3, 'active', (data.step || data.message || 'In progress...').substring(0, 35));
+  }
+
+  // Akash sub-step events
+  if (type === 'akash_close_old') setPipelineStep(3, 'active', 'Closing old deployment...');
+  if (type === 'akash_create_deploy') setPipelineStep(3, 'active', 'Creating new deployment...');
+  if (type === 'akash_bids_received') setPipelineStep(3, 'active', 'Bids received: ' + (data.count || '?'));
+  if (type === 'akash_bid_selected') setPipelineStep(3, 'active', 'Bid selected');
+  if (type === 'akash_lease_created') setPipelineStep(3, 'active', 'Lease created');
+  if (type === 'akash_uri_ready') setPipelineStep(3, 'active', 'URI ready, verifying...');
+
+  if (type === 'recovery_complete' || type === 'recovery_done') {
+    const t = data.total_time_seconds ? data.total_time_seconds + 's' : '';
+    const dseq = data.new_dseq || '';
+    setPipelineStep(3, 'done', 'Recovered');
+    setPipelineStep(4, 'done', (dseq ? 'DSEQ ' + dseq : 'Success') + (t ? ' in ' + t : ''));
+  }
+
+  if (type === 'recovery_failed' || type === 'recovery_fail') {
+    setPipelineStep(3, 'fail', 'Failed');
+    setPipelineStep(4, 'fail', (data.error || 'Recovery failed').substring(0, 35));
+  }
+
+  if (type === 'service_healthy') {
+    // Reset pipeline to idle monitoring state after a short delay
+    setTimeout(() => { resetPipeline(false); setPipelineStep(0, 'active', 'Monitoring...'); }, 3000);
+  }
+}
 
 const $log = document.getElementById('log');
 const $services = document.getElementById('services');
@@ -1492,8 +1722,8 @@ async function fetchStats() {
           <div class="quick-stat-label">Recoveries</div>
         </div>
         <div class="quick-stat">
-          <div class="quick-stat-value">${str.avg_recovery_time_seconds ? str.avg_recovery_time_seconds + 's' : '-'}</div>
-          <div class="quick-stat-label">Avg Time</div>
+          <div class="quick-stat-value">${str.avg_recovery_time_seconds ? str.avg_recovery_time_seconds + 's' : 'N/A'}</div>
+          <div class="quick-stat-label">Avg Recovery</div>
         </div>
         <div class="quick-stat">
           <div class="quick-stat-value">${str.total_health_checks || 0}</div>
@@ -1504,6 +1734,11 @@ async function fetchStats() {
 
     renderServices(sr.services);
     updateLiveFromServices(sr.services);
+
+    // Update pipeline failure threshold from config
+    pipelineThreshold = str.failure_threshold || 3;
+    const $pd1 = document.getElementById('pDetail1');
+    if ($pd1 && pipelineFailures !== null) $pd1.textContent = pipelineFailures + ' / ' + pipelineThreshold;
 
     // Hero card
     const $heroUptime = document.getElementById('heroUptime');
@@ -1525,7 +1760,7 @@ async function fetchStats() {
     const $heroRecov = document.getElementById('heroRecoveries');
     if ($heroRecov) $heroRecov.textContent = str.total_recoveries_attempted || 0;
     const $heroAvg = document.getElementById('heroAvgRecovery');
-    if ($heroAvg) $heroAvg.textContent = str.avg_recovery_time_seconds ? str.avg_recovery_time_seconds + 's' : '-';
+    if ($heroAvg) $heroAvg.textContent = str.avg_recovery_time_seconds ? str.avg_recovery_time_seconds + 's' : 'N/A';
     const $heroChecks = document.getElementById('heroTotalChecks');
     if ($heroChecks) $heroChecks.textContent = str.total_health_checks || 0;
     const $heroSvc = document.getElementById('heroActiveServices');
@@ -1568,7 +1803,7 @@ async function fetchStats() {
       document.getElementById('statFailures').textContent = failures;
       document.getElementById('statRecoveries').textContent = attempted > 0 ? succeeded + '/' + attempted + ' successful' : '0';
       document.getElementById('statRecoveries').style.color = succeeded === attempted && attempted > 0 ? 'var(--green)' : attempted > 0 ? 'var(--orange)' : 'var(--text)';
-      document.getElementById('statAvgRecov').textContent = str.avg_recovery_time_seconds ? str.avg_recovery_time_seconds + 's' : '-';
+      document.getElementById('statAvgRecov').textContent = str.avg_recovery_time_seconds ? str.avg_recovery_time_seconds + 's' : 'N/A';
     }
 
     // Right column: Recent Decisions
@@ -1656,6 +1891,8 @@ function connectSSE() {
       try {
         const evt = JSON.parse(e.data);
         addEvent(evt);
+        // Update live pipeline card
+        handlePipelineEvent(t, evt.data || {});
         // Refresh service cards on important events
         if (t === 'health_check' && evt.data && evt.data.status === 'healthy') {
           fetchStats();

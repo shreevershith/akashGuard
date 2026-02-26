@@ -279,6 +279,7 @@ async def get_stats() -> JSONResponse:
         "avg_recovery_time_seconds": avg_recovery_time,
         "agent_uptime_seconds": round(time.time() - _start_time),
         "monitoring_interval_seconds": settings.health_check_interval,
+        "failure_threshold": settings.failure_threshold,
         "llm_model": settings.akashml_model,
         "services_count": len(services),
     })

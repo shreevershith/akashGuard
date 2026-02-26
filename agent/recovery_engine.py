@@ -90,9 +90,7 @@ class RecoveryEngine:
                 body_text = resp.text[:300]
                 # Treat "Deployment closed" as success — it's already closed
                 if resp.status_code == 400 and "closed" in body_text.lower():
-                    logger.info("close_deployment dseq=%s already closed, treating as success", dseq)
-                    self._emit_api_resp("DELETE", f"/v1/deployments/{dseq}", resp.status_code, f"Deployment {dseq} already closed")
-                    bus.emit("akash_close_old", {"service": self._service_name, "old_dseq": dseq, "status": "closed"})
+                    logger.info("close_deployment dseq=%s already closed (killed by user), skipping", dseq)
                     return True
                 logger.warning("close_deployment dseq=%s got %s: %s", dseq, resp.status_code, body_text)
                 self._emit_api_resp("DELETE", f"/v1/deployments/{dseq}", resp.status_code, f"Failed: {resp.text[:200]}")
@@ -273,16 +271,16 @@ class RecoveryEngine:
         service_name: str = "",
     ) -> dict[str, Any]:
         self._service_name = service_name
-        t0 = time.monotonic()
+        self._t0 = time.monotonic()
         try:
             result = await self._do_recover(service_id, sdl, old_dseq, decision_id)
-            result["total_time_seconds"] = round(time.monotonic() - t0, 1)
+            result["total_time_seconds"] = round(time.monotonic() - self._t0, 1)
             return result
         except Exception as exc:
             error = f"recovery failed unexpectedly: {exc}"
             logger.error("recover_service service_id=%s: %s", service_id, error)
             r = _fail(error, old_dseq)
-            r["total_time_seconds"] = round(time.monotonic() - t0, 1)
+            r["total_time_seconds"] = round(time.monotonic() - self._t0, 1)
             return r
 
     async def _do_recover(
@@ -450,6 +448,7 @@ class RecoveryEngine:
                     outcome="success",
                     new_dseq=new_dseq,
                     new_provider=provider,
+                    downtime_seconds=round(time.monotonic() - self._t0, 1),
                 )
         except Exception as exc:
             logger.error("failed to update DB after recovery: %s", exc)
