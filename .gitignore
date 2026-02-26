@@ -9,6 +9,9 @@ misc/
 .claude/
 CLAUDE.md
 
+# Development tracking (internal tasks/notes — exclude for submission)
+tasks/
+
 # Python
 venv/
 __pycache__/

@@ -86,7 +86,6 @@ akashguard/
 │   └── chatbot-sdl.yaml        # Chatbot SDL
 │
 ├── misc/                       # Testing & debugging scripts
-├── tasks/                      # Development tracking
 ├── data/                       # SQLite database (gitignored)
 ├── .env.example                # Environment variable template
 └── README.md
