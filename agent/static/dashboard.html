@@ -1396,12 +1396,7 @@ function renderEvent(evt) {
       return '';
 
     case 'akash_close_old':
-      const closeOk = (d.status||'').includes('closed') && !(d.status||'').includes('failed');
-      return `<div class="evt ${closeOk ? 'evt-health-ok' : 'evt-health-fail'}">
-        <div class="evt-time">${timeStr} &middot; ${svc}</div>
-        <div class="evt-label"><span class="ai-akash-tag">AI → Akash Console</span> ${closeOk ? '&#10004;' : '&#10060;'} Old Deployment ${closeOk ? 'Closed' : 'Close Failed'}</div>
-        <div class="evt-body">DSEQ ${d.old_dseq}</div>
-      </div>`;
+      return '';  // Internal step, not shown in activity log
 
     case 'akash_create_deploy':
       return `<div class="evt evt-api">
