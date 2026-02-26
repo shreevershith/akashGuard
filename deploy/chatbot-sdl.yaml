@@ -3,14 +3,14 @@ version: "2.0"
 
 services:
   chatbot:
-    image: xploitkid/akashguard-chatbot:latest
+    image: DOCKER_HUB_USERNAME/akashguard-chatbot:latest
     expose:
       - port: 5000
         as: 80
         to:
           - global: true
     env:
-      - AKASHML_API_KEY=akml-piofGkmukeiNwkwifRPJFJfSmcWCyNWY
+      - AKASHML_API_KEY=<AKASHML_API_KEY>
       - AKASHML_BASE_URL=https://api.akashml.com/v1
       - AKASHML_MODEL=meta-llama/Llama-3.3-70B-Instruct
 
