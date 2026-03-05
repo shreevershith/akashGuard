@@ -87,7 +87,7 @@ class RecoveryEngine:
             logger.debug("DELETE /deployments/%s status=%s body=%s", dseq, resp.status_code, resp.text[:300])
             if resp.status_code >= 400:
                 body_text = resp.text[:300]
-                # Already closed (user killed it) — silently succeed, no dashboard events
+                # Already closed (user killed it) - silently succeed, no dashboard events
                 if resp.status_code == 400 and "closed" in body_text.lower():
                     logger.info("close_deployment dseq=%s already closed, skipping", dseq)
                     return True
@@ -165,7 +165,6 @@ class RecoveryEngine:
 
     async def create_lease(
         self, manifest: str, dseq: str, gseq: int, oseq: int, provider: str,
-        certificate: dict[str, str] | None = None,
     ) -> bool:
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
@@ -175,10 +174,8 @@ class RecoveryEngine:
                     "manifest": manifest,
                     "leases": [{"dseq": dseq, "gseq": gseq, "oseq": oseq, "provider": provider}],
                 }
-                if certificate:
-                    body["certificate"] = certificate
-                logger.info("create_lease attempt %d/%d: dseq=%s provider=%s cert=%s",
-                            attempt, max_attempts, dseq, provider, bool(certificate))
+                logger.info("create_lease attempt %d/%d: dseq=%s provider=%s",
+                            attempt, max_attempts, dseq, provider)
                 resp = await self._client.post("/leases", json=body)
                 logger.info("POST /leases status=%s response=%s", resp.status_code, resp.text[:1000])
                 if resp.status_code >= 400:
@@ -209,58 +206,6 @@ class RecoveryEngine:
                 self._emit_api_resp("POST", "/v1/leases", 0, f"Failed: {exc}")
                 return False
         return False
-
-    async def get_certificate(self) -> dict[str, str] | None:
-        try:
-            resp = await self._client.get("/certificates")
-            logger.debug("GET /certificates status=%s", resp.status_code)
-            if resp.status_code >= 400:
-                logger.info("no existing certificate, creating one...")
-                return await self.create_certificate()
-            data = resp.json()
-            certs = data if isinstance(data, list) else data.get("data", [])
-            if certs and isinstance(certs, list) and len(certs) > 0:
-                cert = certs[0]
-                cert_pem = cert.get("certPem") or cert.get("cert") or cert.get("certificate", {}).get("cert")
-                key_pem = cert.get("keyPem") or cert.get("key") or cert.get("certificate", {}).get("pubkey")
-                if cert_pem and key_pem:
-                    logger.info("found existing certificate")
-                    return {"certPem": cert_pem, "keyPem": key_pem}
-            logger.info("no usable certificate found, creating one...")
-            return await self.create_certificate()
-        except Exception as exc:
-            logger.error("get_certificate failed: %s", exc)
-            return None
-
-    async def create_certificate(self) -> dict[str, str] | None:
-        try:
-            resp = await self._client.post("/certificates")
-            logger.info("POST /certificates status=%s response=%s", resp.status_code, resp.text[:500])
-            if resp.status_code >= 400:
-                logger.error("create_certificate failed: status=%s body=%s", resp.status_code, resp.text)
-                return None
-            data = resp.json()
-            cert_data = data.get("data", data) if isinstance(data, dict) else data
-            cert_pem = cert_data.get("certPem") or cert_data.get("cert")
-            key_pem = (
-                cert_data.get("encryptedKey")
-                or cert_data.get("keyPem")
-                or cert_data.get("key")
-            )
-            pub_pem = cert_data.get("pubkeyPem") or cert_data.get("pubkey")
-            if cert_pem and key_pem:
-                logger.info("certificate created successfully")
-                result = {"certPem": cert_pem, "keyPem": key_pem}
-                if pub_pem:
-                    result["pubkeyPem"] = pub_pem
-                return result
-            logger.warning("create_certificate response missing cert/key. keys found: %s", list(cert_data.keys()))
-            return None
-        except Exception as exc:
-            logger.error("create_certificate failed: %s", exc)
-            return None
-
-    # ------------------------------------------------------------------
     # High-level recovery
     # ------------------------------------------------------------------
 
@@ -377,17 +322,9 @@ class RecoveryEngine:
             "denom": bid_price_denom,
         })
 
-        # Fetch certificate for lease creation
-        bus.emit("recovery_progress", {"service": name, "step": "get_cert", "detail": "Fetching deployment certificate..."})
-        certificate = await self.get_certificate()
-        if certificate:
-            logger.info("certificate ready for lease creation")
-        else:
-            logger.warning("no certificate available, proceeding without it")
-
         bus.emit("recovery_progress", {"service": name, "step": "accept_bid", "detail": f"Accepting bid from {provider[:20]}..."})
         logger.info("accepting bid from provider=%s gseq=%d oseq=%d", provider, gseq, oseq)
-        lease_ok = await self.create_lease(manifest, new_dseq, gseq, oseq, provider, certificate=certificate)
+        lease_ok = await self.create_lease(manifest, new_dseq, gseq, oseq, provider)
         if not lease_ok:
             # Clean up orphaned deployment to avoid wasting funds
             logger.info("cleaning up orphaned deployment dseq=%s after lease failure", new_dseq)
@@ -507,3 +444,4 @@ class RecoveryEngine:
             return [], provider
         except Exception:
             return [], None
+
