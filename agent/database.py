@@ -1,3 +1,7 @@
+"""
+SQLite persistence for services, health checks, and agent decisions.
+Discovery helpers: upsert_discovered_service, update_placeholder_to_discovered, mark_stale_discovered_services.
+"""
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,12 +92,23 @@ def init_db() -> None:
                 ON provider_scores(provider_address);
         """)
 
+        # Lightweight migrations for existing local DBs.
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(services)").fetchall()
+        }
+        if "discovered" not in cols:
+            conn.execute("ALTER TABLE services ADD COLUMN discovered INTEGER NOT NULL DEFAULT 0")
+        if "last_discovered_at" not in cols:
+            conn.execute("ALTER TABLE services ADD COLUMN last_discovered_at TEXT")
+
 
 # ---------------------------------------------------------------------------
 # Services
 # ---------------------------------------------------------------------------
 
 def add_service(name: str, health_url: str, sdl_template: str | None = None) -> int:
+    """Insert a new service. Raises if name already exists (UNIQUE constraint)."""
     now = _now()
     with _get_conn() as conn:
         cur = conn.execute(
@@ -102,6 +117,26 @@ def add_service(name: str, health_url: str, sdl_template: str | None = None) -> 
             (name, health_url, sdl_template, now, now),
         )
         return cur.lastrowid  # type: ignore[return-value]
+
+
+def add_or_update_service(
+    name: str, health_url: str, sdl_template: str | None = None,
+) -> int:
+    """Insert a service or update health_url/sdl_template if name already exists. Returns service id."""
+    now = _now()
+    with _get_conn() as conn:
+        conn.execute(
+            """INSERT INTO services (name, health_url, sdl_template, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET
+                   health_url = excluded.health_url,
+                   sdl_template = COALESCE(NULLIF(excluded.sdl_template, ''), sdl_template),
+                   updated_at = excluded.updated_at
+            """,
+            (name, health_url, sdl_template or "", now, now),
+        )
+        row = conn.execute("SELECT id FROM services WHERE name = ?", (name,)).fetchone()
+        return int(row["id"]) if row else 0
 
 
 def get_service(service_id: int) -> dict[str, Any] | None:
@@ -113,6 +148,14 @@ def get_service(service_id: int) -> dict[str, Any] | None:
 def get_all_services() -> list[dict[str, Any]]:
     with _get_conn() as conn:
         rows = conn.execute("SELECT * FROM services ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_monitored_services() -> list[dict[str, Any]]:
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM services WHERE status != 'inactive' ORDER BY id",
+        ).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -145,6 +188,131 @@ def update_service_deployment(
                    WHERE id = ?""",
                 (dseq, provider, now, service_id),
             )
+
+
+def upsert_discovered_service(
+    name: str,
+    health_url: str,
+    dseq: str | None,
+    provider: str | None,
+    sdl_template: str | None = None,
+) -> int:
+    """Create or update a discovered service record by name.
+
+    Safe behavior:
+    - Never deletes services
+    - Updates health_url/dseq/provider on conflicts
+    - Preserves existing SDL unless new non-empty SDL is provided
+    """
+    now = _now()
+    with _get_conn() as conn:
+        conn.execute(
+            """INSERT INTO services (
+                   name, health_url, sdl_template, status, current_dseq, current_provider,
+                   consecutive_failures, discovered, last_discovered_at, created_at, updated_at
+               ) VALUES (?, ?, ?, 'unknown', ?, ?, 0, 1, ?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET
+                   health_url = excluded.health_url,
+                   current_dseq = excluded.current_dseq,
+                   current_provider = excluded.current_provider,
+                   discovered = 1,
+                   last_discovered_at = excluded.last_discovered_at,
+                   status = CASE
+                       WHEN services.status = 'inactive' THEN 'unknown'
+                       ELSE services.status
+                   END,
+                   sdl_template = CASE
+                       WHEN excluded.sdl_template IS NOT NULL AND excluded.sdl_template != ''
+                       THEN excluded.sdl_template
+                       ELSE services.sdl_template
+                   END,
+                   updated_at = excluded.updated_at
+            """,
+            (name, health_url, sdl_template, dseq, provider, now, now, now),
+        )
+        row = conn.execute("SELECT id FROM services WHERE name = ?", (name,)).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def update_placeholder_to_discovered(
+    dseq: str,
+    new_name: str,
+    health_url: str,
+    provider: str | None,
+    sdl_template: str | None = None,
+) -> int:
+    """If a placeholder service exists (name='akash-{dseq}'), update it to real name/url.
+    Returns the number of rows updated (0 or 1).
+    """
+    placeholder_name = f"akash-{dseq}"
+    now = _now()
+    with _get_conn() as conn:
+        cur = conn.execute(
+            """UPDATE services
+               SET name = ?, health_url = ?, current_provider = ?,
+                   sdl_template = CASE
+                       WHEN ? IS NOT NULL AND ? != '' THEN ?
+                       ELSE sdl_template
+                   END,
+                   last_discovered_at = ?, updated_at = ?
+               WHERE name = ? AND TRIM(COALESCE(current_dseq, '')) = ?
+            """,
+            (
+                new_name, health_url, provider or "",
+                sdl_template, sdl_template or "", sdl_template or "",
+                now, now,
+                placeholder_name, dseq.strip(),
+            ),
+        )
+        return int(cur.rowcount or 0)
+
+
+def mark_stale_discovered_services(active_dseqs: set[str]) -> tuple[int, list[int]]:
+    """Mark discovered services whose deployment is no longer on Akash as 'down' (not inactive)
+    so they remain monitored and can trigger redeployment. Returns (count, list of affected service ids).
+    """
+    normalized = {str(d).strip() for d in active_dseqs if str(d).strip()}
+    now = _now()
+    with _get_conn() as conn:
+        if normalized:
+            placeholders = ",".join("?" for _ in normalized)
+            # Select affected IDs first so we can return them for seeding failure records
+            rows = conn.execute(
+                f"""SELECT id FROM services
+                    WHERE discovered = 1
+                      AND current_dseq IS NOT NULL
+                      AND TRIM(current_dseq) != ''
+                      AND current_dseq NOT IN ({placeholders})
+                      AND status != 'inactive'
+                      AND status != 'down'
+                """,
+                tuple(sorted(normalized)),
+            ).fetchall()
+            affected_ids = [int(r["id"]) for r in rows]
+            if affected_ids:
+                conn.execute(
+                    """UPDATE services
+                       SET status = 'down', updated_at = ?
+                       WHERE id IN (""" + ",".join("?" * len(affected_ids)) + ")",
+                    (now, *affected_ids),
+                )
+            return len(affected_ids), affected_ids
+        else:
+            rows = conn.execute(
+                """SELECT id FROM services
+                   WHERE discovered = 1 AND status != 'inactive' AND status != 'down'
+                """,
+            ).fetchall()
+            affected_ids = [int(r["id"]) for r in rows]
+            if affected_ids:
+                conn.execute(
+                    """UPDATE services
+                       SET status = 'down', updated_at = ?
+                       WHERE discovered = 1 AND status != 'inactive' AND status != 'down'
+                    """,
+                    (now,),
+                )
+            return len(affected_ids), affected_ids
 
 
 # ---------------------------------------------------------------------------

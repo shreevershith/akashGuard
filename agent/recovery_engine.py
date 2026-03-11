@@ -1,5 +1,11 @@
+"""
+Recovery engine: talk to Akash Console API to close old deployments, create new ones,
+accept bids, create leases, and poll for URIs. All timing is driven by config.
+Provider diversity: avoid recently-failed provider and optionally pick from top N cheapest.
+"""
 import asyncio
 import logging
+import random
 import time
 from typing import Any
 
@@ -10,6 +16,13 @@ from agent.config import settings
 from agent.database import update_decision_outcome, update_service_deployment
 
 logger = logging.getLogger("akashguard.recovery")
+
+# HTTP client timeout for Console API (create deployment, lease, etc. can be slow)
+RECOVERY_HTTP_TIMEOUT = 90.0
+
+# Providers that recently failed create_lease: provider -> monotonic timestamp when they failed.
+# We deprioritize them until recovery_failed_provider_avoid_seconds has passed, then they can be chosen again.
+_recent_failed_providers: dict[str, float] = {}
 
 
 def _fail(error: str, old_dseq: str | None = None) -> dict[str, Any]:
@@ -32,7 +45,7 @@ class RecoveryEngine:
                 "x-api-key": settings.akash_console_api_key,
                 "Content-Type": "application/json",
             },
-            timeout=httpx.Timeout(120.0),
+            timeout=httpx.Timeout(RECOVERY_HTTP_TIMEOUT),
         )
         self._service_name: str = ""
 
@@ -60,18 +73,53 @@ class RecoveryEngine:
     # Low-level API wrappers
     # ------------------------------------------------------------------
 
+    # --- List / get deployments ---
+
     async def get_deployments(self) -> list[dict[str, Any]]:
+        """Fetch all active deployments; follows pagination (limit/offset) if supported by API."""
+        all_deployments: list[dict[str, Any]] = []
+        limit = 50
+        offset = 0
         try:
-            resp = await self._client.get("/deployments")
-            logger.debug("GET /deployments status=%s", resp.status_code)
-            resp.raise_for_status()
-            data = resp.json()
-            return data if isinstance(data, list) else data.get("data", [])
+            while True:
+                params = {"limit": limit, "offset": offset}
+                resp = await self._client.get("/deployments", params=params)
+                logger.debug("GET /deployments limit=%d offset=%d status=%s", limit, offset, resp.status_code)
+                resp.raise_for_status()
+                data = resp.json()
+                page: list[dict[str, Any]] = []
+                if isinstance(data, list):
+                    page = data
+                elif isinstance(data, dict):
+                    data_field = data.get("data")
+                    if isinstance(data_field, list):
+                        page = data_field
+                    elif isinstance(data_field, dict):
+                        if isinstance(data_field.get("deployments"), list):
+                            page = data_field.get("deployments", [])
+                    if not page and isinstance(data.get("deployments"), list):
+                        page = data.get("deployments", [])
+                seen_dseqs = {str(d.get("deployment", d).get("dseq") or d.get("dseq") or ""): d for d in all_deployments}
+                for d in page:
+                    dep = d.get("deployment", d)
+                    did = dep.get("id") if isinstance(dep.get("id"), dict) else {}
+                    dseq = str(dep.get("dseq") or did.get("dseq") or "").strip()
+                    if dseq and dseq not in seen_dseqs:
+                        seen_dseqs[dseq] = d
+                all_deployments = list(seen_dseqs.values())
+                if len(page) < limit:
+                    break
+                offset += limit
+                # Safety: avoid infinite loop if API keeps returning full pages
+                if offset >= 500:
+                    logger.warning("get_deployments stopped after 500 items (pagination safety)")
+                    break
+            return all_deployments
         except Exception as exc:
             logger.error("get_deployments failed: %s", exc)
-            return []
-
+            return all_deployments if all_deployments else []
     async def get_deployment(self, dseq: str) -> dict[str, Any]:
+        """Fetch full deployment detail including leases and URIs."""
         try:
             resp = await self._client.get(f"/deployments/{dseq}")
             logger.debug("GET /deployments/%s status=%s", dseq, resp.status_code)
@@ -82,6 +130,7 @@ class RecoveryEngine:
             return {}
 
     async def close_deployment(self, dseq: str) -> bool:
+        """Close (delete) a deployment on Akash; idempotent if already closed."""
         try:
             resp = await self._client.delete(f"/deployments/{dseq}")
             logger.debug("DELETE /deployments/%s status=%s body=%s", dseq, resp.status_code, resp.text[:300])
@@ -108,9 +157,8 @@ class RecoveryEngine:
             logger.error("close_deployment dseq=%s failed: %s", dseq, exc)
             return False
 
-    async def create_deployment(
-        self, sdl: str, deposit: float = 5.0,
-    ) -> dict[str, Any] | None:
+    async def create_deployment(self, sdl: str, deposit: float = 5.0) -> dict[str, Any] | None:
+        """Create a new deployment from SDL; returns dseq, manifest, tx hash."""
         self._emit_api("POST", "/v1/deployments", "Creating new deployment on Akash Network")
         try:
             body = {"data": {"sdl": sdl, "deposit": deposit}}
@@ -145,6 +193,7 @@ class RecoveryEngine:
             return None
 
     async def get_bids(self, dseq: str) -> list[dict[str, Any]]:
+        """Fetch provider bids for a deployment."""
         self._emit_api("GET", f"/v1/bids?dseq={dseq}", "Fetching provider bids")
         try:
             resp = await self._client.get("/bids", params={"dseq": dseq})
@@ -166,6 +215,8 @@ class RecoveryEngine:
     async def create_lease(
         self, manifest: str, dseq: str, gseq: int, oseq: int, provider: str,
     ) -> bool:
+        """Accept a bid by creating a lease; retries on failure with configurable delay."""
+        retry_delay = settings.recovery_lease_retry_delay_seconds
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             self._emit_api("POST", "/v1/leases", f"Creating lease with provider {provider[:20]}... (attempt {attempt}/{max_attempts})")
@@ -174,16 +225,14 @@ class RecoveryEngine:
                     "manifest": manifest,
                     "leases": [{"dseq": dseq, "gseq": gseq, "oseq": oseq, "provider": provider}],
                 }
-                logger.info("create_lease attempt %d/%d: dseq=%s provider=%s",
-                            attempt, max_attempts, dseq, provider)
+                logger.info("create_lease attempt %d/%d: dseq=%s provider=%s", attempt, max_attempts, dseq, provider)
                 resp = await self._client.post("/leases", json=body)
                 logger.info("POST /leases status=%s response=%s", resp.status_code, resp.text[:1000])
                 if resp.status_code >= 400:
-                    logger.error("create_lease attempt %d FAILED: status=%s response=%s",
-                                 attempt, resp.status_code, resp.text)
+                    logger.error("create_lease attempt %d FAILED: status=%s response=%s", attempt, resp.status_code, resp.text)
                     if attempt < max_attempts:
-                        logger.info("retrying create_lease in 10s...")
-                        await asyncio.sleep(10)
+                        logger.info("retrying create_lease in %ds...", retry_delay)
+                        await asyncio.sleep(retry_delay)
                         continue
                     self._emit_api_resp("POST", "/v1/leases", resp.status_code, f"Failed ({resp.status_code}): {resp.text[:300]}")
                     return False
@@ -201,13 +250,12 @@ class RecoveryEngine:
             except Exception as exc:
                 logger.error("create_lease attempt %d exception: %s", attempt, exc)
                 if attempt < max_attempts:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(retry_delay)
                     continue
                 self._emit_api_resp("POST", "/v1/leases", 0, f"Failed: {exc}")
                 return False
         return False
-    # High-level recovery
-    # ------------------------------------------------------------------
+    # --- High-level recovery (close old -> create -> bids -> lease -> poll URIs) ---
 
     async def recover_service(
         self,
@@ -263,10 +311,11 @@ class RecoveryEngine:
             logger.error(error)
             return _fail(error, old_dseq)
 
-        # Step 3: wait for bids
-        bus.emit("recovery_progress", {"service": name, "step": "waiting_bids", "detail": f"Waiting 30s for provider bids on DSEQ {new_dseq}..."})
-        logger.info("waiting 30s for bids on dseq=%s", new_dseq)
-        await asyncio.sleep(30)
+        # Step 3: wait for provider bids
+        bid_wait = settings.recovery_bid_wait_seconds
+        bus.emit("recovery_progress", {"service": name, "step": "waiting_bids", "detail": f"Waiting {bid_wait}s for provider bids on DSEQ {new_dseq}..."})
+        logger.info("waiting %ds for bids on dseq=%s", bid_wait, new_dseq)
+        await asyncio.sleep(bid_wait)
 
         bids = await self.get_bids(new_dseq)
         open_bids = [b for b in bids if self._bid_is_open(b)]
@@ -297,15 +346,30 @@ class RecoveryEngine:
             "bids_summary": bids_summary,
         })
 
-        # Step 4: accept cheapest open bid (sort by price ascending)
+        # Step 4: select bid — prefer providers we didn't just fail with; pick from top N for diversity
         def _bid_price_float(b: dict) -> float:
             try:
                 return float(b.get("bid", b).get("price", {}).get("amount", "999999"))
             except (ValueError, TypeError):
                 return 999999.0
 
+        def _bid_provider(b: dict) -> str:
+            bid_id = b.get("bid", b).get("id", b.get("id", {}))
+            return str(bid_id.get("provider", "")).strip()
+
         open_bids.sort(key=_bid_price_float)
-        bid = open_bids[0]
+        # Prefer providers that haven't failed recently (expire after recovery_failed_provider_avoid_seconds so they get another chance)
+        now = time.monotonic()
+        avoid_secs = settings.recovery_failed_provider_avoid_seconds
+        if avoid_secs > 0:
+            for p in list(_recent_failed_providers):
+                if now - _recent_failed_providers[p] > avoid_secs:
+                    del _recent_failed_providers[p]
+        currently_avoid = set(_recent_failed_providers.keys())
+        preferred = [b for b in open_bids if _bid_provider(b) not in currently_avoid]
+        candidates = preferred if preferred else open_bids
+        top_n = min(max(1, settings.recovery_bid_top_n), len(candidates))
+        bid = random.choice(candidates[:top_n])
         bid_id = bid.get("bid", {}).get("id", bid.get("id", {}))
         provider = bid_id.get("provider", "")
         gseq = int(bid_id.get("gseq", 1))
@@ -326,19 +390,21 @@ class RecoveryEngine:
         logger.info("accepting bid from provider=%s gseq=%d oseq=%d", provider, gseq, oseq)
         lease_ok = await self.create_lease(manifest, new_dseq, gseq, oseq, provider)
         if not lease_ok:
-            # Clean up orphaned deployment to avoid wasting funds
+            _recent_failed_providers[provider] = time.monotonic()
+            logger.info("provider %s added to recent_failed (deprioritized for %ds)", provider[:24], avoid_secs)
             logger.info("cleaning up orphaned deployment dseq=%s after lease failure", new_dseq)
             await self.close_deployment(new_dseq)
             error = f"create_lease failed for dseq={new_dseq} provider={provider}"
             logger.error(error)
             return _fail(error, old_dseq)
+        _recent_failed_providers.pop(provider, None)
 
-        # Step 5: poll for URIs
-        bus.emit("recovery_progress", {"service": name, "step": "poll_uris", "detail": "Polling for service URIs..."})
+        # Step 5: poll for URIs until service is live
+        max_wait = settings.recovery_uri_poll_seconds
+        poll_interval = settings.recovery_uri_poll_interval_seconds
         uris: list[str] = []
-        max_wait = 90
-        poll_interval = 10
         elapsed = 0
+        bus.emit("recovery_progress", {"service": name, "step": "poll_uris", "detail": "Polling for service URIs..."})
 
         while elapsed < max_wait:
             await asyncio.sleep(poll_interval)

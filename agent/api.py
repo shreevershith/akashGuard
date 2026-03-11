@@ -100,7 +100,7 @@ async def dashboard() -> FileResponse:
 
 @app.get("/api/services")
 async def get_services() -> JSONResponse:
-    services = db.get_all_services()
+    services = db.get_monitored_services()
     return JSONResponse({"services": services})
 
 
@@ -109,7 +109,7 @@ async def get_health_checks(service_id: int | None = None, limit: int = 50) -> J
     if service_id:
         checks = db.get_recent_health_checks(service_id, limit)
         return JSONResponse({"health_checks": {"_": checks}})
-    services = db.get_all_services()
+    services = db.get_monitored_services()
     result = {}
     for svc in services:
         result[svc["name"]] = db.get_recent_health_checks(svc["id"], limit)
@@ -128,7 +128,7 @@ async def get_decisions(limit: int = 20) -> JSONResponse:
 
 @app.get("/api/status")
 async def get_status() -> JSONResponse:
-    services = db.get_all_services()
+    services = db.get_monitored_services()
     enriched = []
     for svc in services:
         recent = db.get_recent_health_checks(svc["id"], limit=1)
@@ -149,6 +149,7 @@ async def get_status() -> JSONResponse:
         "recent_events": bus.get_recent_events(50),
         "agent_status": "running" if _agent_instance and _agent_instance.running else "stopped",
         "agent_uptime": round(time.time() - _start_time),
+        "failure_threshold": settings.failure_threshold,
     })
 
 
@@ -190,7 +191,7 @@ async def event_stream():
 
 @app.post("/api/services/{service_name}/kill")
 async def kill_service(service_name: str) -> JSONResponse:
-    services = db.get_all_services()
+    services = db.get_monitored_services()
     svc = next((s for s in services if s["name"] == service_name), None)
     if not svc:
         return JSONResponse({"error": f"Service '{service_name}' not found"}, status_code=404)
@@ -224,7 +225,7 @@ async def kill_service(service_name: str) -> JSONResponse:
 
 @app.post("/api/services/{service_name}/simulate-failure")
 async def simulate_failure(service_name: str) -> JSONResponse:
-    services = db.get_all_services()
+    services = db.get_monitored_services()
     svc = next((s for s in services if s["name"] == service_name), None)
     if not svc:
         return JSONResponse({"error": f"Service '{service_name}' not found"}, status_code=404)
@@ -253,7 +254,7 @@ async def simulate_failure(service_name: str) -> JSONResponse:
 
 @app.get("/api/stats")
 async def get_stats() -> JSONResponse:
-    services = db.get_all_services()
+    services = db.get_monitored_services()
 
     total_checks = 0
     total_failures = 0
@@ -283,3 +284,4 @@ async def get_stats() -> JSONResponse:
         "llm_model": settings.akashml_model,
         "services_count": len(services),
     })
+

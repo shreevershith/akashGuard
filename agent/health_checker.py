@@ -7,7 +7,7 @@ import httpx
 
 from agent.config import settings
 from agent.database import (
-    get_all_services,
+    get_monitored_services,
     get_recent_health_checks,
     record_health_check,
     update_service_status,
@@ -89,7 +89,7 @@ class HealthChecker:
 
     async def check_all_services(self) -> list[dict[str, Any]]:
         try:
-            services = get_all_services()
+            services = get_monitored_services()
         except Exception as exc:
             logger.error("failed to load services: %s", exc)
             return []
@@ -148,7 +148,7 @@ class HealthChecker:
 if __name__ == "__main__":
     import sys
 
-    from agent.database import add_service, get_service, init_db
+    from agent.database import add_service, get_all_services, get_service, init_db
 
     logging.basicConfig(
         level=logging.INFO,
@@ -188,3 +188,5 @@ if __name__ == "__main__":
             await checker.close()
 
     asyncio.run(main())
+
+

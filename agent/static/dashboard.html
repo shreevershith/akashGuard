@@ -162,6 +162,39 @@
     font-variant-numeric: tabular-nums;
     font-family: var(--mono);
   }
+  .refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .refresh-btn:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .refresh-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+  .refresh-btn .refresh-icon {
+    width: 16px;
+    height: 16px;
+    transition: transform 0.2s ease;
+  }
+  .refresh-btn.spinning .refresh-icon {
+    animation: refresh-spin 0.8s linear infinite;
+  }
+  @keyframes refresh-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
 
   /* ─── Layout ─── */
   .layout {
@@ -941,6 +974,9 @@
       <span class="sse-dot disconnected" id="sseDot"></span>
       <span id="sseLabel">Connecting...</span>
     </div>
+    <button type="button" class="refresh-btn" id="refreshBtn" title="Refresh services and pipeline (no page reload)" aria-label="Refresh">
+      <svg class="refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+    </button>
     <span class="clock" id="clock"></span>
   </div>
 </div>
@@ -1144,7 +1180,7 @@ function resetPipeline(keepPing) {
   pipelineFailures = 0;
 }
 
-function handlePipelineEvent(type, data) {
+function handlePipelineEvent(type, data, isReplay) {
   if (type === 'health_check') {
     const st = data.status || '';
     const code = data.status_code || '';
@@ -1209,8 +1245,7 @@ function handlePipelineEvent(type, data) {
   }
 
   if (type === 'service_healthy') {
-    // Reset pipeline to idle monitoring state after a short delay
-    setTimeout(() => { resetPipeline(false); setPipelineStep(0, 'active', 'Monitoring...'); }, 3000);
+    if (!isReplay) setTimeout(() => { resetPipeline(false); setPipelineStep(0, 'active', 'Monitoring...'); }, 3000);
   }
 }
 
@@ -1484,6 +1519,13 @@ function renderEvent(evt) {
         <div class="evt-body">${d.error || 'Unknown error'}</div>
       </div>`;
 
+    case 'recovery_skipped':
+      return `<div class="evt evt-recovery-failed">
+        <div class="evt-time">${timeStr}</div>
+        <div class="evt-label">&#9888; Recovery Skipped &mdash; ${svc}</div>
+        <div class="evt-body">${d.message || d.reason || 'No SDL template'}</div>
+      </div>`;
+
     case 'service_killed':
       return '';  // User action, not agent activity
 
@@ -1698,12 +1740,15 @@ function updateHeroSparkline(stats) {
 }
 
 // ───── Stats + Services refresh ─────
-async function fetchStats() {
+// Pass (status, stats) to use pre-fetched data and avoid duplicate requests
+async function fetchStats(overrideStatus, overrideStats) {
   try {
-    const [sr, str] = await Promise.all([
-      fetch('/api/status').then(r => r.json()),
-      fetch('/api/stats').then(r => r.json()),
-    ]);
+    let sr = overrideStatus, str = overrideStats;
+    if (sr == null || str == null) {
+      const [sRes, stRes] = await Promise.all([fetch('/api/status'), fetch('/api/stats')]);
+      if (sr == null) sr = await sRes.json();
+      if (str == null) str = await stRes.json();
+    }
 
     // Quick stats in left column
     $quickStats.innerHTML = `
@@ -1874,7 +1919,7 @@ function connectSSE() {
     'akash_api_call','akash_api_response','akash_close_old','akash_create_deploy',
     'akash_bids_received','akash_bid_selected','akash_lease_created','akash_uri_ready',
     'telegram_sent','recovery_start','recovery_progress','recovery_complete',
-    'recovery_done','recovery_failed','recovery_fail','service_killed','heartbeat'
+    'recovery_done','recovery_failed','recovery_fail','recovery_skipped','service_killed','heartbeat'
   ];
 
   types.forEach(t => {
@@ -1888,7 +1933,7 @@ function connectSSE() {
         if (t === 'health_check' && evt.data && evt.data.status === 'healthy') {
           fetchStats();
         }
-        if (['recovery_complete','recovery_done','recovery_failed','recovery_fail','service_healthy','service_down','health_check'].includes(t)) {
+        if (['recovery_complete','recovery_done','recovery_failed','recovery_fail','recovery_skipped','service_healthy','service_down','health_check'].includes(t)) {
           fetchStats();
         }
       } catch(err) { console.error('parse error', t, err); }
@@ -1898,25 +1943,48 @@ function connectSSE() {
   return es;
 }
 
-// ───── Initial load ─────
-async function init() {
+// Replay recent events into the pipeline so pipeline state matches server (no reset on refresh)
+function hydratePipelineFromEvents(events, failureThreshold) {
+  if (failureThreshold != null) pipelineThreshold = failureThreshold;
+  (events || []).forEach(evt => {
+    handlePipelineEvent(evt.type || '', evt.data || {}, true);
+  });
+}
+
+// Replace event log with server's recent events (so refresh shows current activity)
+function syncEventLog(events) {
+  const $empty = document.getElementById('logEmpty');
+  Array.from($log.children).filter(el => el !== $empty).forEach(el => el.remove());
+  (events || []).forEach(evt => addEvent(evt));
+  if (events && events.some(e => renderEvent(e) !== '')) clearEmptyState();
+}
+
+// Full dashboard sync: services, pipeline, event log, stats, hero, charts. Optional silent=true for auto-refresh.
+async function refreshData(silent) {
+  const btn = document.getElementById('refreshBtn');
+  if (btn && !silent) { btn.disabled = true; btn.classList.add('spinning'); }
   try {
-    const r = await fetch('/api/status');
-    const d = await r.json();
+    const [statusRes, statsRes] = await Promise.all([fetch('/api/status'), fetch('/api/stats')]);
+    const d = await statusRes.json();
+    const str = await statsRes.json();
+    pipelineThreshold = str.failure_threshold ?? d.failure_threshold ?? 3;
+    const events = d.recent_events || [];
     renderServices(d.services || []);
     updateLiveFromServices(d.services || []);
-    const events = d.recent_events || [];
-    events.forEach(evt => addEvent(evt));
-    // If any real events loaded, make sure empty state is gone
-    if (events.some(e => renderEvent(e) !== '')) {
-      clearEmptyState();
-    }
-  } catch(e) { console.error('init', e); }
+    hydratePipelineFromEvents(events, pipelineThreshold);
+    syncEventLog(events);
+    await fetchStats(d, str);
+  } catch (e) { console.error('refreshData', e); }
+  if (btn && !silent) { btn.disabled = false; btn.classList.remove('spinning'); }
+}
 
-  fetchStats();
+// ───── Initial load ─────
+async function init() {
+  await refreshData(true);
   connectSSE();
-
-  setInterval(() => { fetchStats(); }, 10000);
+  document.getElementById('refreshBtn')?.addEventListener('click', () => refreshData(false));
+  // Auto-update entire dashboard every 15s so everything stays in sync without manual refresh
+  setInterval(() => refreshData(true), 15000);
 }
 
 init();
