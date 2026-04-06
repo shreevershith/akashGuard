@@ -16,7 +16,7 @@ Monitor loop (every 15s by default)
   |-- Health check all monitored services
   |-- Record metrics (status code, response time, errors)
   |-- If service unhealthy (3+ consecutive failures by default):
-  |   |-- LLM diagnosis (Llama 3.3 70B via AkashML)
+  |   |-- LLM diagnosis (Groq, e.g. Llama 3.3 70B)
   |   |   -> Recommends action: redeploy / wait / scale / none
   |   |-- If redeploy (confidence ≥ 70%):
   |   |   |-- Close old deployment on Akash (best effort)
@@ -39,7 +39,7 @@ Monitor loop (every 15s by default)
 
 - **Autonomous recovery** — Detects failures and redeploys to new providers without human intervention
 - **Killed-deployment handling** — When you kill a deployment in Akash Console, the agent marks it down, seeds failure records, and triggers redeploy (no manual re-register)
-- **AI-powered diagnosis** — Llama 3.3 70B (AkashML) analyzes health data and recommends redeploy / wait / scale
+- **AI-powered diagnosis** — Groq (OpenAI-compatible API; default Llama 3.3 70B) analyzes health data and recommends redeploy / wait / scale
 - **Real-time dashboard** — Live SSE updates; full sync on load/refresh and auto-refresh every 15s (services, pipeline, event log, stats)
 - **Dashboard refresh** — “Refresh” button and pipeline hydration from recent events so the pipeline does not reset to “Ping” on page reload
 - **Optional parallel recovery** — `RECOVERY_PARALLEL=true` allows up to 2 concurrent recoveries for faster multi-service restoration
@@ -67,7 +67,7 @@ Monitor loop (every 15s by default)
 | Layer | Technology |
 |-------|------------|
 | Runtime | Python 3.11, asyncio, FastAPI |
-| AI/LLM | AkashML (Llama 3.3 70B) |
+| AI/LLM | Groq (diagnosis); AkashML optional for other stacks |
 | Voice + Vision | Venice AI (optional) |
 | Infrastructure | Akash Network, Docker, Akash Console API |
 | Database | SQLite (WAL) |
@@ -105,7 +105,7 @@ akashguard/
 
 - Python 3.11+
 - Docker (for container workflow)
-- API keys: **Akash Console**, **AkashML**; optional: Telegram, Venice
+- API keys: **Akash Console**, **Groq** (diagnosis LLM); optional: AkashML (chatbot), Telegram, Venice
 
 ### Setup
 
@@ -117,7 +117,7 @@ pip install -r agent/requirements.txt
 pip install -r chatbot/requirements.txt
 
 cp .env.example .env
-# Edit .env: AKASH_CONSOLE_API_KEY, AKASHML_API_KEY, etc.
+# Edit .env: AKASH_CONSOLE_API_KEY, GROQ_API_KEY, etc.
 ```
 
 ---
@@ -242,9 +242,12 @@ See [.env.example](.env.example). Key variables:
 |----------|-------------|--------|
 | `AKASH_CONSOLE_API_KEY` | Akash Console API key | required |
 | `AKASH_CONSOLE_API_BASE` | Console API base URL | `https://console-api.akash.network/v1` |
-| `AKASHML_API_KEY` | AkashML API key for LLM | required |
+| `GROQ_API_KEY` | Groq API key for diagnosis LLM | required for diagnosis |
+| `GROQ_BASE_URL` | Groq OpenAI-compatible base URL | `https://api.groq.com/openai/v1` |
+| `GROQ_MODEL` | Diagnosis model id | `llama-3.3-70b-versatile` |
+| `AKASHML_API_KEY` | AkashML (optional; not used for agent diagnosis) | optional |
 | `AKASHML_BASE_URL` | AkashML base URL | `https://api.akashml.com/v1` |
-| `AKASHML_MODEL` | LLM model | `meta-llama/Llama-3.3-70B-Instruct` |
+| `AKASHML_MODEL` | AkashML model | `meta-llama/Llama-3.3-70B-Instruct` |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token | optional |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID | optional |
 | `HEALTH_CHECK_INTERVAL` | Seconds between monitor cycles | `15` |

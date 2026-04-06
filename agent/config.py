@@ -13,7 +13,12 @@ class Settings(BaseSettings):
     venice_vision_model: str = "qwen3-235b-a22b-instruct-2507"
     venice_chat_model: str = "llama-3.3-70b"
 
-    # --- AkashML LLM (diagnosis) ---
+    # --- Groq LLM (diagnosis) — OpenAI-compatible API ---
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "llama-3.3-70b-versatile"
+
+    # --- AkashML LLM (diagnosis) — optional fallback; not used when Groq is configured above ---
     akashml_api_key: str = ""
     akashml_base_url: str = "https://api.akashml.com/v1"
     akashml_model: str = "meta-llama/Llama-3.3-70B-Instruct"

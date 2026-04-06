@@ -281,7 +281,8 @@ async def get_stats() -> JSONResponse:
         "agent_uptime_seconds": round(time.time() - _start_time),
         "monitoring_interval_seconds": settings.health_check_interval,
         "failure_threshold": settings.failure_threshold,
-        "llm_model": settings.akashml_model,
+        # "llm_model": settings.akashml_model,
+        "llm_model": settings.groq_model,
         "services_count": len(services),
     })
 

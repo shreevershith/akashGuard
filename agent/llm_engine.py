@@ -29,10 +29,20 @@ VALID_ACTIONS = {"redeploy", "wait", "scale", "none"}
 class DiagnosisEngine:
 
     def __init__(self) -> None:
+        # Diagnosis uses Groq (OpenAI-compatible). Set GROQ_API_KEY in .env.
+        # Previous AkashML setup (commented):
+        # self._client = AsyncOpenAI(
+        #     api_key=settings.akashml_api_key,
+        #     base_url=settings.akashml_base_url,
+        # )
+        # self._diagnosis_model = settings.akashml_model
         self._client = AsyncOpenAI(
-            api_key=settings.akashml_api_key,
-            base_url=settings.akashml_base_url,
+            # api_key=settings.akashml_api_key,
+            # base_url=settings.akashml_base_url,
+            api_key=settings.groq_api_key,
+            base_url=settings.groq_base_url,
         )
+        self._diagnosis_model = settings.groq_model
 
     def _build_prompt(
         self,
@@ -92,13 +102,15 @@ class DiagnosisEngine:
             bus.emit("llm_request", {
                 "service": service_name,
                 "prompt_summary": prompt[:200],
-                "model": settings.akashml_model,
+                # "model": settings.akashml_model,
+                "model": self._diagnosis_model,
             })
 
             t0 = time.monotonic()
 
             completion = await self._client.chat.completions.create(
-                model=settings.akashml_model,
+                # model=settings.akashml_model
+                model=self._diagnosis_model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
@@ -121,7 +133,8 @@ class DiagnosisEngine:
                 "confidence": result["confidence"],
                 "recommended_action": result["recommended_action"],
                 "reasoning": result["reasoning"],
-                "model": settings.akashml_model,
+                # "model": settings.akashml_model,
+                "model": self._diagnosis_model,
                 "tokens_used": tokens_used,
                 "response_time_ms": elapsed_ms,
             })
@@ -158,7 +171,8 @@ class DiagnosisEngine:
                 "confidence": 0.0,
                 "recommended_action": "wait",
                 "reasoning": f"LLM call failed: {exc}",
-                "model": settings.akashml_model,
+                # "model": settings.akashml_model,
+                "model": self._diagnosis_model,
                 "tokens_used": None,
                 "response_time_ms": None,
                 "error": str(exc),
