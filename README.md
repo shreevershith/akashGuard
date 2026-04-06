@@ -110,7 +110,7 @@ akashguard/
 ### Setup
 
 ```bash
-git clone https://github.com/xploit007/akashGuard.git
+git clone https://github.com/shreevershith/akashGuard.git
 cd akashGuard
 
 pip install -r agent/requirements.txt
